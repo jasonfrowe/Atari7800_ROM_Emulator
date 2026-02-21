@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Upload with Signature",
+			"type": "shell",
+			"command": "platformio run --target upload",
+			"group": "build"
+		}
+	]
+}
