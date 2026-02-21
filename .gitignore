@@ -24,5 +24,7 @@ Thumbs.db
 *.o
 *.a
 *.78
+
+*.a78
 !astrowing.a78
-Choplifter_NTSC.a78
+external

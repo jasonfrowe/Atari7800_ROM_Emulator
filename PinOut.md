@@ -47,6 +47,7 @@ This configuration allows atomic address reading via direct GPIO register access
 | HALT              | Input     | 5          | GPIO9_PSR bit 8   | Console→Cart control (LOW = Halt)     |
 | Buffer /OE        | Output    | 2          | GPIO9_DR bit 4    | U3 Output Enable (LOW = Enabled)      |
 | Buffer DIR        | Output    | 33         | GPIO7_DR bit 12   | U3 Direction (HIGH = Teensy→Atari)    |
+| EAUD              | Output    | 37         | GPIO7_DR bit 19   | PWM Audio Output                      |
 
 ## Notes
 
