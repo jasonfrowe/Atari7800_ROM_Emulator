@@ -1,6 +1,17 @@
 #include "pokey.h"
 #include <string.h>
 
+const uint8_t Pokey::DistortionLUT[8][16] = {
+    {0,0,0,0,0,0,0,0,0,0,1,1,0,0,1,1}, // 0: 5 & 17 (Bits 1 & 3)
+    {0,0,1,1,0,0,1,1,0,0,1,1,0,0,1,1}, // 1: 5 (Bit 1)
+    {0,0,0,0,0,0,0,0,0,1,0,1,0,1,0,1}, // 2: 4 & 17 (Bits 0 & 3)
+    {0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1}, // 3: 4 (Bit 0)
+    {0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1}, // 4: 17 (Bit 3)
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}, // 5: Pure
+    {0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1}, // 6: 9 (Bit 2)
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}  // 7: Pure
+};
+
 Pokey::Pokey() {
     Reset();
 }
@@ -13,6 +24,9 @@ void Pokey::Reset() {
     m_cachedOutput = 0;
     m_tickStep = 0;
     m_tempTotal = 0;
+    m_polyState = 0;
+    m_clock64 = 0;
+    m_postCounter = 0;
     
     m_poly4 = 0x0F;
     m_poly5 = 0x1F;
@@ -26,11 +40,14 @@ void Pokey::Write(uint8 addr, uint8 val) {
     
     if (addr < 8 && (addr & 1) == 0) {
         m_divisor[addr >> 1] = val;
+    } else if (addr == 9) { // STIMER
+        for (int i = 0; i < 4; i++) {
+            m_counter[i] = m_divisor[i];
+        }
     }
 }
 
 void Pokey::UpdatePoly() {
-    // Fast LFSR Updates
     uint32 bit4 = ((m_poly4 >> 3) ^ (m_poly4 >> 2)) & 1;
     m_poly4 = ((m_poly4 << 1) | bit4) & 0x0F;
 
@@ -42,6 +59,8 @@ void Pokey::UpdatePoly() {
 
     uint32 bit17 = ((m_poly17 >> 16) ^ (m_poly17 >> 13)) & 1;
     m_poly17 = ((m_poly17 << 1) | bit17) & 0x1FFFF;
+
+    m_polyState = (m_poly4 & 1) | ((m_poly5 & 1) << 1) | ((m_poly9 & 1) << 2) | ((m_poly17 & 1) << 3);
 }
 
 bool Pokey::TickStep() {
@@ -49,18 +68,26 @@ bool Pokey::TickStep() {
         case 0:
             UpdatePoly();
             m_tempTotal = 0;
+
+            // --- 64kHz Clock Division (Decrement every 28 ticks) ---
+            m_clock64++;
+            if (m_clock64 >= 28) m_clock64 = 0;
+
             m_tickStep = 1;
             break;
 
-        case 1: case 3: case 5: case 7: {
-            int i = (m_tickStep - 1) >> 1;
+        case 1: case 2: case 3: case 4: {
+            int i = m_tickStep - 1;
             uint8 audc = m_regs[i * 2 + 1];
             if (!(audc & 0x10)) {
-                if (m_counter[i] == 0) {
-                    m_counter[i] = m_divisor[i];
-                    m_output[i] ^= 1;
-                } else {
-                    m_counter[i]--;
+                // Timers only decrement on the 64kHz edge (every 28 ticks)
+                if (m_clock64 == 0) {
+                    if (m_counter[i] == 0) {
+                        m_counter[i] = m_divisor[i];
+                        m_output[i] ^= 1;
+                    } else {
+                        m_counter[i]--;
+                    }
                 }
             } else {
                 m_output[i] = 1;
@@ -69,34 +96,23 @@ bool Pokey::TickStep() {
             break;
         }
 
-        case 2: case 4: case 6: case 8: {
-            int i = (m_tickStep - 2) >> 1;
+        case 5: case 6: case 7: case 8: {
+            int i = m_tickStep - 5;
             uint8 audc = m_regs[i * 2 + 1];
-            bool signal = m_output[i];
-            
-            if (signal) {
+            if (m_output[i]) {
                 uint8 dist = (audc >> 5) & 0x07;
-                switch (dist) {
-                    case 0: signal &= (m_poly5  & 1) && (m_poly17 & 1); break;
-                    case 1: signal &= (m_poly5  & 1); break;
-                    case 2: signal &= (m_poly4  & 1) && (m_poly17 & 1); break;
-                    case 3: signal &= (m_poly4  & 1); break;
-                    case 4: signal &= (m_poly17 & 1); break;
-                    case 5: break; 
-                    case 6: signal &= (m_poly9  & 1); break;
-                    case 7: break; 
+                if (DistortionLUT[dist][m_polyState]) {
+                    m_tempTotal += (audc & 0x0F);
                 }
-                if (signal) m_tempTotal += (audc & 0x0F);
             }
 
             if (m_tickStep == 8) {
-                // Final Step: Scale and reset
+                // Done. Scale 0-60 to 0-255.
                 m_cachedOutput = (uint8)((m_tempTotal << 2) + (m_tempTotal >> 2));
                 m_tickStep = 0;
-                return true; // Cycle complete
-            } else {
-                m_tickStep++;
+                return true; 
             }
+            m_tickStep++;
             break;
         }
     }
