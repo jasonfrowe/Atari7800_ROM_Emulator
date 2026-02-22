@@ -2,37 +2,25 @@
 #include "game_rom.h"
 
 // ============================================================================
-// ATARI 7800 ROM EMULATOR FOR 2600+ (48K ROM) - FAST ADDRESSING
-// ============================================================================
-// WIRING: REWIRED for GPIO6/GPIO7 Alignment (See Chat History)
-// LOGIC:  Atomic Address Read (Direct Register) -> Instant Drive
-// MAP:    $4000-$FFFF (Active if A15 or A14 is High)
+// ATARI 7800 ROM EMULATOR FOR 2600+ (48K ROM) - PURE ADDRESS LOGIC
 // ============================================================================
 
-// --- SKIP STARTUP DELAYS (300ms total) ---
+// --- SKIP STARTUP DELAYS ---
 extern "C" void startup_middle_hook(void);
 extern "C" volatile uint32_t systick_millis_count;
 
 void startup_middle_hook(void) {
-  // Force millis() to be 300 to skip startup delays
   systick_millis_count = 300;
 }
 
-// --- PIN DEFINITIONS (REWIRED) ---
+// --- PIN DEFINITIONS ---
 const int PIN_OE   = 2;
-const int PIN_RW   = 3;
-const int PIN_PHI2 = 4;
-const int PIN_HALT = 5;
 const int PIN_DIR  = 33;
-// Pins 10,12,11,13,6,9,32,8 are used for A0-A7
-// Pins 22,23,20,21,38,39,26,27 are used for A8-A15
+const int PIN_AUDIO = 37;
 
-// --- CORRECTED DIRECT REGISTER MASKS (Ground Truth) ---
-// GPIO9 Control Pins (Teensy 4.1)
-// Pin 2 (OE)   is GPIO9_04. 
-// Pin 33 (DIR) is GPIO9_07. (HIGH = Drive Atari, LOW = Listen)
+// --- DIRECTION MACROS ---
+#define DATA_BUS_MASK (0xFF << 16) 
 
-// Safe Transition: Release Teensy -> Switch Buffer to Listen
 #define SET_BUS_LISTEN() { \
     GPIO6_GDIR &= ~DATA_BUS_MASK; \
     asm volatile ("dsb" ::: "memory"); \
@@ -40,7 +28,6 @@ const int PIN_DIR  = 33;
     asm volatile ("dsb" ::: "memory"); \
 }
 
-// Safe Transition: Load Data -> Switch Buffer to Drive -> Enable Teensy Output
 #define SET_BUS_DRIVE(data) { \
     GPIO6_DR = (GPIO6_DR & ~DATA_BUS_MASK) | ((uint32_t)(data) << 16); \
     GPIO9_DR |= (1<<7); \
@@ -49,34 +36,39 @@ const int PIN_DIR  = 33;
     asm volatile ("dsb" ::: "memory"); \
 }
 
-// Data Bus Output (GPIO6_16 to GPIO6_23)
-#define DATA_BUS_MASK    (0xFF << 16) 
+// --- POKEY EMULATION ---
+#include "PokeyWrapper.h"
+PokeyWrapper pokey;
+
+#define CYCLES_PER_TICK 335 
+uint32_t lastPokeyCycle = 0;
+uint32_t pokeyDebt = 0;
 
 void setup() {
-    // 1. Configure Hardware Registers
     pinMode(PIN_OE, OUTPUT);
     GPIO9_DR |= (1<<4); // Disable buffer initially (HIGH)
     
     pinMode(PIN_DIR, OUTPUT);
     SET_BUS_LISTEN(); // Start in safe LISTEN mode
     
-    // 2. Lock Buffer Enabled
     GPIO9_DR &= ~(1<<4); // OE = LOW (Enabled)
     
+    analogWrite(PIN_AUDIO, 1); 
+    analogWriteFrequency(PIN_AUDIO, 375000); 
+    analogWriteResolution(8);
+
+    pokey.begin();
+    lastPokeyCycle = ARM_DWT_CYCCNT;
+
     noInterrupts();
 }
 
-// ULTRA-FAST ATOMIC ADDRESS READ (~12ns)
 __attribute__((always_inline)) 
 inline uint16_t readFull16BitAddress() {
     uint32_t g6 = GPIO6_PSR;
     uint32_t g7 = GPIO7_PSR;
     
-    // High Byte (A8-A15): GPIO6 Bits 24-31 (Verified Ground Truth)
     uint16_t high = (g6 >> 16) & 0xFF00;
-    
-    // Low Byte (A0-A7): GPIO7 mappings (Verified Ground Truth)
-    // A0-A3 (Bits 0-3), A4-A6 (Bits 10-12), A7 (Bit 16)
     uint16_t low = (g7 & 0x0F) | ((g7 >> 6) & 0x70) | ((g7 >> 9) & 0x80);
     
     return high|low;
@@ -85,13 +77,16 @@ inline uint16_t readFull16BitAddress() {
 void FASTRUN loop() {
     uint16_t addr;
     uint8_t data;
-    bool isDriving = false; // State-tracking for direction
+    bool isDriving = false; 
     
+    volatile uint32_t *gpio6_dr = &GPIO6_DR;
+    volatile uint32_t *gpio6_psr = &GPIO6_PSR;
+    volatile uint32_t *gpio9_psr = &GPIO9_PSR;
+
     while (1) {
-        // 1. Atomic Read
         addr = readFull16BitAddress();
         
-        // 2. ROM PATH ($4000 - $FFFF)
+        // --- 1. CARTRIDGE SPACE (Drive ROM Data) ---
         if (addr >= 0x4000) {
             data = ROM_DATA[addr - 0x4000];
             
@@ -99,15 +94,46 @@ void FASTRUN loop() {
                 SET_BUS_DRIVE(data);
                 isDriving = true;
             } else {
-                // Update data pins without full transition
-                GPIO6_DR = (GPIO6_DR & ~DATA_BUS_MASK) | ((uint32_t)data << 16);
+                *gpio6_dr = (*gpio6_dr & ~DATA_BUS_MASK) | ((uint32_t)data << 16);
             }
         } 
-        // 3. LISTEN HOME ($0000 - $3FFF) - Rule 3
+        // --- 2. LISTEN SPACE (Idle / Pokey) ---
         else {
             if (isDriving) {
                 SET_BUS_LISTEN();
                 isDriving = false;
+            }
+
+            // --- MARIA DMA PROTECTION ---
+            // PIN 5 (HALT) is GPIO9 bit 8. 
+            // HIGH = 6502 CPU is running. LOW = MARIA is doing DMA.
+            if (*gpio9_psr & (1 << 8)) {
+                
+                // A. POKEY SPACE: Read Address, Read Data
+                if ((addr & 0xFFF0) == 0x0450) {
+                    uint8_t busData = (*gpio6_psr >> 16) & 0xFF;
+                    pokey.writeRegister(addr & 0x0F, busData);
+                }
+
+                // B. POKEY MATH: Process Ticks
+                uint32_t currentCycle = ARM_DWT_CYCCNT;
+                if ((currentCycle - lastPokeyCycle) >= CYCLES_PER_TICK) {
+                    pokeyDebt += 9; 
+                    lastPokeyCycle += CYCLES_PER_TICK;
+                }
+
+                if (pokeyDebt > 0) {
+                    pokey.tickStep();
+                    pokeyDebt--;
+                }
+
+                // C. PWM REFRESH
+                // We only update PWM when the CPU is running. The hardware 
+                // PWM will automatically hold the last state during MARIA DMA!
+                uint32_t sample = pokey.getOutput();
+                uint32_t val = (sample * 400) >> 8;
+                FLEXPWM2_SM3VAL5 = val; 
+                FLEXPWM2_MCTRL |= FLEXPWM_MCTRL_LDOK(1<<3); 
             }
         }
     }
