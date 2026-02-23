@@ -2,7 +2,7 @@
 #include "game_rom.h"
 
 // ============================================================================
-// ATARI 7800 ROM EMULATOR FOR 2600+ (48K ROM) - LISTEN-GATED CLOCK
+// ATARI 7800 ROM EMULATOR (48K) - 816MHz OVERCLOCK SYNC
 // ============================================================================
 
 extern "C" void startup_middle_hook(void);
@@ -39,8 +39,8 @@ const int PIN_AUDIO = 37;
 #include "PokeyWrapper.h"
 PokeyWrapper pokey;
 
-// Calibrated for 64kHz audio: 600MHz / (64,000 * 9 steps) = 1041 cycles
-#define CYCLES_PER_STEP 1041 
+// Calibrated for 64kHz @ 816MHz: 816,000,000 / (64,000 * 9 steps) = 1417 cycles
+#define CYCLES_PER_STEP 1417 
 uint32_t lastPokeyCycle = 0;
 uint32_t pokeyDebt = 0;
 
@@ -85,7 +85,7 @@ void FASTRUN loop() {
 
     while (1) {
         // --- 1. PURE ROM BRANCH (Stop Illegal Instructions) ---
-        // Absolutely NO code before this. We must serve the byte immediately.
+        // Absolutely NO logic before this. The Atari 7800 needs instant response.
         addr = readFull16BitAddress();
         
         if (addr >= 0x4000) {
@@ -105,13 +105,12 @@ void FASTRUN loop() {
                 isDriving = false;
             }
 
-            // A. HALT-GATED POKEY BRAIN
-            // PIN 5 (HALT) is GPIO9 bit 8. HIGH = CPU (Stable Bus).
+            // Gated by HALT (Pin 5 / GPIO9 bit 8). HIGH = CPU Active.
             if (*gpio9_psr & (1 << 8)) {
                 
-                // --- CYCLE RECOVERY ---
-                // We track time ONLY here. Since it's a WHILE loop, it will
-                // instantly catch up on all time missed during Maria DMA.
+                // --- CLOCK RECOVERY ---
+                // We track time ONLY in the LISTEN branch.
+                // It will catch up on any time missed during Maria DMA.
                 uint32_t currentCycle = ARM_DWT_CYCCNT;
                 while ((currentCycle - lastPokeyCycle) >= CYCLES_PER_STEP) {
                     pokeyDebt++; 
@@ -128,7 +127,7 @@ void FASTRUN loop() {
                     }
                 }
 
-                // --- DISTRIBUTED MATH ---
+                // --- DISTRIBUTED MATH (1 step at a time) ---
                 if (pokeyDebt > 0) {
                     if (pokey.tickStep()) {
                         uint32_t val = (pokey.getOutput() * 1500) >> 8;
@@ -141,3 +140,4 @@ void FASTRUN loop() {
         }
     }
 }
+
