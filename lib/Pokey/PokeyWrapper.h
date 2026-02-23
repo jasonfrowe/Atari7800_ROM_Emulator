@@ -17,8 +17,8 @@ public:
         m_pokey.Reset(); // Safe to call now
     }
 
-    void tickStep() {
-        m_pokey.TickStep();
+    bool tickStep() {
+        return m_pokey.TickStep();
     }
 
     uint8_t getOutput() {

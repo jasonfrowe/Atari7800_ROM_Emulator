@@ -25,7 +25,6 @@ void Pokey::Reset() {
     m_tickStep = 0;
     m_tempTotal = 0;
     m_polyState = 0;
-    m_clock64 = 0;
     m_postCounter = 0;
     
     m_poly4 = 0x0F;
@@ -69,10 +68,6 @@ bool Pokey::TickStep() {
             UpdatePoly();
             m_tempTotal = 0;
 
-            // --- 64kHz Clock Division (Decrement every 28 ticks) ---
-            m_clock64++;
-            if (m_clock64 >= 28) m_clock64 = 0;
-
             m_tickStep = 1;
             break;
 
@@ -80,14 +75,11 @@ bool Pokey::TickStep() {
             int i = m_tickStep - 1;
             uint8 audc = m_regs[i * 2 + 1];
             if (!(audc & 0x10)) {
-                // Timers only decrement on the 64kHz edge (every 28 ticks)
-                if (m_clock64 == 0) {
-                    if (m_counter[i] == 0) {
-                        m_counter[i] = m_divisor[i];
-                        m_output[i] ^= 1;
-                    } else {
-                        m_counter[i]--;
-                    }
+                if (m_counter[i] == 0) {
+                    m_counter[i] = m_divisor[i];
+                    m_output[i] ^= 1;
+                } else {
+                    m_counter[i]--;
                 }
             } else {
                 m_output[i] = 1;

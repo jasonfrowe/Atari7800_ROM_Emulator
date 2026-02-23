@@ -29,7 +29,6 @@ private:
     uint8_t m_cachedOutput;
     uint8_t m_tickStep;
     uint32_t m_tempTotal;
-    uint8_t  m_clock64;      // Divider for 64kHz mode (28 ticks)
     uint32_t m_postCounter;  // Counter for 3-second POST chirp
 
     void UpdatePoly();

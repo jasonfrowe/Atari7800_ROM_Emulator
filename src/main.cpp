@@ -123,17 +123,15 @@ void FASTRUN loop() {
                 }
 
                 if (pokeyDebt > 0) {
-                    pokey.tickStep();
+                    if (pokey.tickStep()) {
+                        // C. PWM REFRESH - Only when a full sample is ready!
+                        uint32_t sample = pokey.getOutput();
+                        uint32_t val = (sample * 400) >> 8;
+                        FLEXPWM2_SM3VAL5 = val; 
+                        FLEXPWM2_MCTRL |= FLEXPWM_MCTRL_LDOK(1<<3); 
+                    }
                     pokeyDebt--;
                 }
-
-                // C. PWM REFRESH
-                // We only update PWM when the CPU is running. The hardware 
-                // PWM will automatically hold the last state during MARIA DMA!
-                uint32_t sample = pokey.getOutput();
-                uint32_t val = (sample * 400) >> 8;
-                FLEXPWM2_SM3VAL5 = val; 
-                FLEXPWM2_MCTRL |= FLEXPWM_MCTRL_LDOK(1<<3); 
             }
         }
     }
