@@ -2,10 +2,9 @@
 #include "game_rom.h"
 
 // ============================================================================
-// ATARI 7800 ROM EMULATOR FOR 2600+ (48K ROM) - PURE ADDRESS LOGIC
+// ATARI 7800 ROM EMULATOR FOR 2600+ (48K ROM) - CALIBRATED DISTRIBUTED
 // ============================================================================
 
-// --- SKIP STARTUP DELAYS ---
 extern "C" void startup_middle_hook(void);
 extern "C" volatile uint32_t systick_millis_count;
 
@@ -40,7 +39,8 @@ const int PIN_AUDIO = 37;
 #include "PokeyWrapper.h"
 PokeyWrapper pokey;
 
-#define CYCLES_PER_TICK 335 
+// Calibrated for 64kHz audio: 600MHz / (64,000 * 9 steps) = 1041 cycles
+#define CYCLES_PER_STEP 1041 
 uint32_t lastPokeyCycle = 0;
 uint32_t pokeyDebt = 0;
 
@@ -84,9 +84,20 @@ void FASTRUN loop() {
     volatile uint32_t *gpio9_psr = &GPIO9_PSR;
 
     while (1) {
+        // A. REAL-TIME CLOCK (Fixes "Low Pitch")
+        // Always track passed time, even during Maria DMA.
+        uint32_t currentCycle = ARM_DWT_CYCCNT;
+        while ((currentCycle - lastPokeyCycle) >= CYCLES_PER_STEP) {
+            pokeyDebt++; 
+            lastPokeyCycle += CYCLES_PER_STEP;
+        }
+
+        // Safety Cap to prevent catch-up stalls
+        if (pokeyDebt > 2000) pokeyDebt = 2000;
+
         addr = readFull16BitAddress();
         
-        // --- 1. CARTRIDGE SPACE (Drive ROM Data) ---
+        // --- 1. CARTRIDGE SPACE (Pure ROM Path - Zero Jitter) ---
         if (addr >= 0x4000) {
             data = ROM_DATA[addr - 0x4000];
             
@@ -96,37 +107,33 @@ void FASTRUN loop() {
             } else {
                 *gpio6_dr = (*gpio6_dr & ~DATA_BUS_MASK) | ((uint32_t)data << 16);
             }
+            // NO POKEY MATH HERE. Keep the bus timing as clean as possible.
         } 
-        // --- 2. LISTEN SPACE (Idle / Pokey) ---
+        // --- 2. LISTEN/MATH SPACE ---
         else {
             if (isDriving) {
                 SET_BUS_LISTEN();
                 isDriving = false;
             }
 
-            // --- MARIA DMA PROTECTION ---
-            // PIN 5 (HALT) is GPIO9 bit 8. 
-            // HIGH = 6502 CPU is running. LOW = MARIA is doing DMA.
+            // --- B. DISTRIBUTED POKEY WORK (HALT-Gated) ---
+            // HALT (Pin 5) is GPIO9 bit 8. HIGH = CPU in control.
             if (*gpio9_psr & (1 << 8)) {
                 
-                // A. POKEY SPACE: Read Address, Read Data
+                // POKEY SNIFFER (Gated by R/W)
                 if ((addr & 0xFFF0) == 0x0450) {
-                    uint8_t busData = (*gpio6_psr >> 16) & 0xFF;
-                    pokey.writeRegister(addr & 0x0F, busData);
+                    // Pin 3 (R/W) is GPIO9 bit 5. LOW = Write.
+                    if (!(*gpio9_psr & (1 << 5))) {
+                        uint8_t busData = (*gpio6_psr >> 16) & 0xFF;
+                        pokey.writeRegister(addr & 0x0F, busData);
+                    }
                 }
 
-                // B. POKEY MATH: Process Ticks
-                uint32_t currentCycle = ARM_DWT_CYCCNT;
-                if ((currentCycle - lastPokeyCycle) >= CYCLES_PER_TICK) {
-                    pokeyDebt += 9; 
-                    lastPokeyCycle += CYCLES_PER_TICK;
-                }
-
+                // C. DISTRIBUTED MATH
+                // Process one step while the CPU is busy with non-ROM cycles.
                 if (pokeyDebt > 0) {
                     if (pokey.tickStep()) {
-                        // C. PWM REFRESH - Only when a full sample is ready!
-                        uint32_t sample = pokey.getOutput();
-                        uint32_t val = (sample * 400) >> 8;
+                        uint32_t val = (pokey.getOutput() * 1500) >> 8;
                         FLEXPWM2_SM3VAL5 = val; 
                         FLEXPWM2_MCTRL |= FLEXPWM_MCTRL_LDOK(1<<3); 
                     }
