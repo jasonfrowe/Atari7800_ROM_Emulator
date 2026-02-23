@@ -2,7 +2,7 @@
 #include "game_rom.h"
 
 // ============================================================================
-// ATARI 7800 ROM EMULATOR (48K) - 816MHz OVERCLOCK SYNC
+// ATARI 7800 ROM EMULATOR (48K) - GRAPHICS FINE-TUNING (816MHz)
 // ============================================================================
 
 extern "C" void startup_middle_hook(void);
@@ -39,7 +39,7 @@ const int PIN_AUDIO = 37;
 #include "PokeyWrapper.h"
 PokeyWrapper pokey;
 
-// Calibrated for 64kHz @ 816MHz: 816,000,000 / (64,000 * 9 steps) = 1417 cycles
+// Calibrated for current correct pitch at 816MHz.
 #define CYCLES_PER_STEP 1417 
 uint32_t lastPokeyCycle = 0;
 uint32_t pokeyDebt = 0;
@@ -84,10 +84,11 @@ void FASTRUN loop() {
     volatile uint32_t *gpio9_psr = &GPIO9_PSR;
 
     while (1) {
-        // --- 1. PURE ROM BRANCH (Stop Illegal Instructions) ---
-        // Absolutely NO logic before this. The Atari 7800 needs instant response.
+        // --- 1. PRISTINE LOOP HEADER (The Graphics Fix) ---
+        // Absolutely NO logic before this. Address read is the #1 priority.
         addr = readFull16BitAddress();
         
+        // --- CARTRIDGE BRANCH (Drive ROM Data) ---
         if (addr >= 0x4000) {
             data = ROM_DATA[addr - 0x4000];
             
@@ -98,7 +99,7 @@ void FASTRUN loop() {
                 *gpio6_dr = (*gpio6_dr & ~DATA_BUS_MASK) | ((uint32_t)data << 16);
             }
         } 
-        // --- 2. LISTEN / MATH BRANCH (Safe Zone) ---
+        // --- LISTEN / SAFE BRANCH ($0000-3FFF) ---
         else {
             if (isDriving) {
                 SET_BUS_LISTEN();
@@ -106,13 +107,14 @@ void FASTRUN loop() {
             }
 
             // Gated by HALT (Pin 5 / GPIO9 bit 8). HIGH = CPU Active.
+            // Maria is IGNORED here to prevent graphics corruption.
             if (*gpio9_psr & (1 << 8)) {
                 
-                // --- CLOCK RECOVERY ---
+                // --- CLOCK RECOVERY (Stall-Free) ---
                 // We track time ONLY in the LISTEN branch.
-                // It will catch up on any time missed during Maria DMA.
+                // Replace while with if to ensure we NEVER stall the bus for >50ns.
                 uint32_t currentCycle = ARM_DWT_CYCCNT;
-                while ((currentCycle - lastPokeyCycle) >= CYCLES_PER_STEP) {
+                if ((currentCycle - lastPokeyCycle) >= CYCLES_PER_STEP) {
                     pokeyDebt++; 
                     lastPokeyCycle += CYCLES_PER_STEP;
                 }
@@ -140,4 +142,3 @@ void FASTRUN loop() {
         }
     }
 }
-
